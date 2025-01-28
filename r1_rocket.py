@@ -5,20 +5,21 @@ from matplotlib.animation import FuncAnimation
 # ======================
 # Parameters
 # ======================
-m = 1.0           # Mass (kg)
+m = 1.0          # Mass (kg)
 L = 6.0           # Length (m) - Increased length
 I = (1/12)*m*L**2 # Moment of inertia
 g = 9.81          # Gravity (m/s²)
-F_thrust = 70.0   # Thrust force (N)
+F_thrust = 60   # Thrust force (N)
 dt = 0.001        # Smaller time step for quicker controller reaction
-total_time = 10   # Simulation duration
+burn_time = 3    # Thrust duration
+total_time = 30   # Maximum simulation duration
 
 # PID controller parameters
 Kp = 2
 Ki = 0.001
 Kd = 0.3
-initial_setpoint = np.deg2rad(69)  # Initial desired angle in radians
-final_setpoint = np.deg2rad(105)   # Final desired angle in radians
+initial_setpoint = np.deg2rad(90)  # Initial desired angle in radians
+final_setpoint = np.deg2rad(60)     # Final desired angle in radians
 
 # Initial state (pointing upward: theta0 = 90°)
 state = np.array([0.0, 0.0, 0.0, 0.0, (np.pi/2), 0.0])  # [x, y, vx, vy, theta, omega]
@@ -27,20 +28,22 @@ state = np.array([0.0, 0.0, 0.0, 0.0, (np.pi/2), 0.0])  # [x, y, vx, vy, theta, 
 # Manual Euler Integration
 # ======================
 # Storage for results
-times = np.arange(0, total_time, dt)
-states = np.zeros((len(times), 6))
-thrust_history = np.zeros(len(times))
-error_history = np.zeros(len(times))
+times = []
+states = []
+thrust_history = []
+error_history = []
 integral_error = 0.0
 previous_error = 0.0
+t = 0.0
 
-for i, t in enumerate(times):
+while t < total_time:
     # Store current state
-    states[i] = state
+    times.append(t)
+    states.append(state)
     x, y, vx, vy, theta, omega = state
     
     # Change setpoint halfway through flight
-    if t < total_time / 2:
+    if t < burn_time / 2:
         desired_angle = initial_setpoint
     else:
         desired_angle = final_setpoint
@@ -50,26 +53,44 @@ for i, t in enumerate(times):
     integral_error += error * dt
     derivative_error = (error - previous_error) / dt
     phi = - (Kp * error + Ki * integral_error + Kd * derivative_error)
-    thrust_history[i] = phi
-    error_history[i] = error
+    thrust_history.append(phi)
+    error_history.append(error)
     previous_error = error
     
     # Calculate forces and torque
-    Fx = F_thrust * np.cos(theta + phi)
-    Fy = F_thrust * np.sin(theta + phi)
-    torque = -(L/2) * F_thrust * np.sin(phi)
+    if t < burn_time:
+        # During powered flight
+        Fx = F_thrust * np.cos(theta + phi)
+        Fy = F_thrust * np.sin(theta + phi)  # Gravity handled separately
+        torque = -(L/2) * F_thrust * np.sin(phi)
+    else:
+        # After thrust cutoff
+        Fx = 0
+        Fy = 0
+        torque = 0
     
     # Update derivatives (Euler integration)
     new_state = [
         x + vx * dt,                     # x position
         y + vy * dt,                     # y position
         vx + (Fx/m) * dt,                # x velocity
-        vy + (Fy/m - g) * dt,            # y velocity
+        vy + (Fy/m - g) * dt,            # y velocity - gravity always affects
         theta + omega * dt,              # angle
         omega + (torque/I) * dt          # angular velocity
     ]
     
     state = np.array(new_state)
+    t += dt
+    
+    # Check if rocket has hit the ground
+    if state[1] < 0:
+        break
+
+# Convert lists to numpy arrays
+times = np.array(times)
+states = np.array(states)
+thrust_history = np.array(thrust_history)
+error_history = np.array(error_history)
 
 # Extract results
 x = states[:, 0]
@@ -80,16 +101,19 @@ theta = states[:, 4]
 # Animation
 # ======================
 fig, ax = plt.subplots(figsize=(10, 6))
-ax.set_xlim(-1500, 1500)  # Adjusted to see the whole flight
-ax.set_ylim(-5, 2000)   # Adjusted to see the whole flight
+# Set fixed view limits based on trajectory
+margin = 100  # increased margin around the trajectory
+ax.set_xlim(min(x) - margin, max(x) + margin)
+ax.set_ylim(min(min(y) - margin, -margin), max(y) + margin)  # Ensure ground is visible
 ax.set_xlabel('X Position (m)')
 ax.set_ylabel('Y Position (m)')
 ax.set_title('Manual Rocket Simulation with PID Controller')
 ax.grid(True)
-ax.set_aspect('equal')  # Ensure equal scaling
+ax.set_aspect('equal')
+ax.axhline(y=0, color='k', linestyle='-', alpha=0.3)  # Add ground line
 
-rocket_line, = ax.plot([], [], 'r-', lw=3)  # Increased line width
-thrust_vector, = ax.plot([], [], 'y-', lw=2)  # Increased line width
+rocket_line, = ax.plot([], [], 'r-', lw=3)
+thrust_vector, = ax.plot([], [], 'y-', lw=2)
 trail, = ax.plot([], [], 'b:', alpha=0.5)
 
 def update(frame):
@@ -98,6 +122,7 @@ def update(frame):
     y_curr = y[frame]
     theta_curr = theta[frame]
     phi_curr = thrust_history[frame]
+    t_curr = times[frame]
     
     # Rocket body
     tip = [x_curr + (L/2)*np.cos(theta_curr), 
@@ -106,12 +131,15 @@ def update(frame):
             y_curr - (L/2)*np.sin(theta_curr)]
     rocket_line.set_data([tail[0], tip[0]], [tail[1], tip[1]])
     
-    # Thrust vector
-    thrust_length = 150  # Increased thrust vector length
-    thrust_vector.set_data(
-        [x_curr, x_curr + thrust_length*np.cos(theta_curr + phi_curr)],
-        [y_curr, y_curr + thrust_length*np.sin(theta_curr + phi_curr)]
-    )
+    # Thrust vector (only show when thrust is active)
+    if t_curr < burn_time:
+        thrust_length = 150
+        thrust_vector.set_data(
+            [x_curr, x_curr + thrust_length*np.cos(theta_curr + phi_curr)],
+            [y_curr, y_curr + thrust_length*np.sin(theta_curr + phi_curr)]
+        )
+    else:
+        thrust_vector.set_data([], [])
     
     # Trail
     trail.set_data(x[:frame], y[:frame])
