@@ -5,24 +5,46 @@ from matplotlib.animation import FuncAnimation
 # ======================
 # Parameters
 # ======================
-m = 1.0          # Mass (kg)
+m = 10          # Mass (kg)
 L = 6.0           # Length (m) - Increased length
 I = (1/12)*m*L**2 # Moment of inertia
 g = 9.81          # Gravity (m/s²)
-F_thrust = 60   # Thrust force (N)
+F_thrust = 200   # Thrust force (N)
 dt = 0.001        # Smaller time step for quicker controller reaction
-burn_time = 3    # Thrust duration
+burn_time = 10   # Thrust duration
 total_time = 30   # Maximum simulation duration
 
 # PID controller parameters
-Kp = 2
+Kp = 1
 Ki = 0.001
-Kd = 0.3
-initial_setpoint = np.deg2rad(90)  # Initial desired angle in radians
-final_setpoint = np.deg2rad(60)     # Final desired angle in radians
+Kd = 0.5
+# Angles now defined relative to vertical (0°):
+# Positive = clockwise from vertical
+# Negative = counterclockwise from vertical
+initial_setpoint = np.deg2rad(0)
+second_setpoint = np.deg2rad(45)
+final_setpoint = np.deg2rad(80) 
 
-# Initial state (pointing upward: theta0 = 90°)
-state = np.array([0.0, 0.0, 0.0, 0.0, (np.pi/2), 0.0])  # [x, y, vx, vy, theta, omega]
+# Nozzle constraints
+MAX_NOZZLE_ANGLE = np.deg2rad(5)    # Maximum deflection angle (radians)
+MAX_NOZZLE_RATE = np.deg2rad(60)     # Maximum rotation rate (radians/second)
+previous_phi = 0                      # Track previous nozzle angle
+
+def limit_nozzle_movement(new_phi, prev_phi, dt):
+    """Limit nozzle angle and rotation rate"""
+    # Limit rotation rate
+    max_delta = MAX_NOZZLE_RATE * dt
+    delta_phi = new_phi - prev_phi
+    delta_phi = np.clip(delta_phi, -max_delta, max_delta)
+    phi = prev_phi + delta_phi
+    
+    # Limit absolute angle
+    phi = np.clip(phi, -MAX_NOZZLE_ANGLE, MAX_NOZZLE_ANGLE)
+    
+    return phi
+
+# Initial state (pointing straight up: theta0 = 0°)
+state = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0])  # [x, y, vx, vy, theta, omega]
 
 # ======================
 # Manual Euler Integration
@@ -43,8 +65,10 @@ while t < total_time:
     x, y, vx, vy, theta, omega = state
     
     # Change setpoint halfway through flight
-    if t < burn_time / 2:
+    if t < 3:
         desired_angle = initial_setpoint
+    elif t < 7:
+        desired_angle = second_setpoint
     else:
         desired_angle = final_setpoint
     
@@ -52,16 +76,21 @@ while t < total_time:
     error = desired_angle - theta
     integral_error += error * dt
     derivative_error = (error - previous_error) / dt
-    phi = - (Kp * error + Ki * integral_error + Kd * derivative_error)
+    raw_phi = - (Kp * error + Ki * integral_error + Kd * derivative_error)
+    
+    # Apply nozzle constraints
+    phi = limit_nozzle_movement(raw_phi, previous_phi, dt)
+    previous_phi = phi  # Store for next iteration
+    
     thrust_history.append(phi)
     error_history.append(error)
     previous_error = error
     
     # Calculate forces and torque
     if t < burn_time:
-        # During powered flight
-        Fx = F_thrust * np.cos(theta + phi)
-        Fy = F_thrust * np.sin(theta + phi)  # Gravity handled separately
+        # During powered flight - using new coordinate system
+        Fx = F_thrust * np.sin(theta + phi)  # Changed from cos
+        Fy = F_thrust * np.cos(theta + phi)  # Changed from sin
         torque = -(L/2) * F_thrust * np.sin(phi)
     else:
         # After thrust cutoff
@@ -125,18 +154,18 @@ def update(frame):
     t_curr = times[frame]
     
     # Rocket body
-    tip = [x_curr + (L/2)*np.cos(theta_curr), 
-           y_curr + (L/2)*np.sin(theta_curr)]
-    tail = [x_curr - (L/2)*np.cos(theta_curr), 
-            y_curr - (L/2)*np.sin(theta_curr)]
+    tip = [x_curr + (L/2)*np.sin(theta_curr), 
+           y_curr + (L/2)*np.cos(theta_curr)]
+    tail = [x_curr - (L/2)*np.sin(theta_curr), 
+            y_curr - (L/2)*np.cos(theta_curr)]
     rocket_line.set_data([tail[0], tip[0]], [tail[1], tip[1]])
     
     # Thrust vector (only show when thrust is active)
     if t_curr < burn_time:
-        thrust_length = 150
+        thrust_length = -30
         thrust_vector.set_data(
-            [x_curr, x_curr + thrust_length*np.cos(theta_curr + phi_curr)],
-            [y_curr, y_curr + thrust_length*np.sin(theta_curr + phi_curr)]
+            [x_curr, x_curr + thrust_length*np.sin(theta_curr + phi_curr)],
+            [y_curr, y_curr + thrust_length*np.cos(theta_curr + phi_curr)]
         )
     else:
         thrust_vector.set_data([], [])
